@@ -5,7 +5,7 @@
 'use strict';
 
 const API = '/api';
-const VERSION = '6.0.0';
+const VERSION = '8.2.0';
 const $ = (s, root=document) => root.querySelector(s);
 const $$ = (s, root=document) => [...root.querySelectorAll(s)];
 
@@ -336,40 +336,72 @@ function updateUserUI(){
 }
 function xpLevel(level){return Math.floor(100*Math.pow(Math.max(0,level-1),1.45));}
 
-function navigateBack(explicitTarget){
-  const fallback={
-    play:'lobby',classic:'play',training:'play',onlineModeView:'play',solo:'classic',rooms:'onlineModeView',room:'rooms',
-    characters:'lobby',customize:'characters',battlePass:'lobby',shop:'lobby',inventory:'lobby',
-    rank:'play',settings:'lobby',modeGameView:'solo',draw:'rooms',game:'solo'
-  };
-  const target=explicitTarget||fallback[state.currentView]||state.previousView||'lobby';
-  if(state.currentView==='game') return exitGame();
-  if(state.currentView==='modeGameView') return exitModeGame();
-  if(state.currentView==='draw') return leaveDrawingGame();
-  if(state.currentView==='room' && !explicitTarget) return leaveRoom();
-  navigate(target);
+const NAV_FALLBACK={
+  lobby:'lobby',play:'lobby',classic:'play',training:'play',onlineMode:'play',solo:'classic',rooms:'onlineMode',room:'rooms',
+  characters:'lobby',customize:'characters',battlePass:'lobby',shop:'lobby',inventory:'lobby',
+  rank:'play',settings:'lobby',modeGame:'solo',draw:'rooms',game:'solo'
+};
+function navigateBack(explicitTarget, fromHistory=false){
+  const current=state.currentView;
+  if(current==='game') return exitGame();
+  if(current==='modeGameView') return exitModeGame();
+  if(current==='draw') return leaveDrawingGame();
+  if(current==='room' && !explicitTarget) return leaveRoom();
+  const target=String(explicitTarget||NAV_FALLBACK[current]||state.previousView||'lobby').replace(/View$/,'');
+  if(target===current)return;
+  // O botão Voltar deve desfazer a entrada atual, e não criar outra entrada.
+  // Assim o botão do navegador e o botão da interface permanecem sincronizados.
+  if(!fromHistory && history.length>1 && history.state?.uvView && (!explicitTarget || history.state.uvFrom===target)){
+    history.back();
+    return;
+  }
+  navigate(target,{fromHistory,replaceHistory:fromHistory});
 }
-
-function navigate(view){
+function navigate(view, opts={}){
   if(!state.user)return;
   const normalized=String(view||'').replace(/View$/,'');
   const target=$(`#${normalized}View`)||$(`#${view}`);
-  if(!target){toast(`Tela "${view}" não encontrada.`,'error');return;}
+  if(!target){toast(`Tela "${view}" não encontrada.`,'error');return false;}
   const nextView=target.id.replace(/View$/,'');
-  if(nextView===state.currentView)return;
+  if(nextView===state.currentView)return true;
   const oldView=state.currentView;
   $$('.view').forEach(v=>v.classList.add('hidden'));target.classList.remove('hidden');state.previousView=oldView;state.currentView=nextView;
-  document.body.classList.toggle('in-game',view==='game');
-  if(view==='game'){ enterGameViewport(); } else { document.body.classList.remove('game-portrait-fallback'); }
+  document.body.classList.toggle('in-game',nextView==='game');
+  if(nextView==='game') enterGameViewport(); else document.body.classList.remove('game-portrait-fallback');
   updateOrientationGuard();
   window.scrollTo({top:0,behavior:'smooth'});
-  if(view==='lobby'){renderCharacter('#heroCharacter',state.profile.avatar);loadMiniRank();void loadFriends();}
-  if(view==='solo')void loadFriends();
-  if(view==='characters'){renderCharactersPage();}
-  if(view==='settings')applySettings();
-  try{history.replaceState({uvView:nextView},'',`#${nextView}`);}catch{}
+  if(nextView==='lobby'){renderCharacter('#heroCharacter',state.profile.avatar);loadMiniRank();void loadFriends();}
+  if(nextView==='solo')void loadFriends();
+  if(nextView==='characters')renderCharactersPage();
+  if(nextView==='settings')applySettings();
+  try{
+    const hash=`#${nextView}`;
+    const entry={uvView:nextView,uvFrom:oldView};
+    if(opts.replaceHistory || !history.pushState) history.replaceState(entry,'',hash);
+    else history.pushState(entry,'',hash);
+  }catch{}
+  return true;
 }
-if(!window.__UV_HISTORY_BOUND__){window.__UV_HISTORY_BOUND__=true;window.addEventListener('popstate',()=>{if(state.user)navigateBack();});}
+if(!window.__UV_HISTORY_BOUND__){
+  window.__UV_HISTORY_BOUND__=true;
+  window.addEventListener('popstate',()=>{
+    if(!state.user)return;
+    const hash=(location.hash||'#lobby').slice(1).replace(/View$/,'');
+    const target=$(`#${hash}View`)||$(`#${hash}`);
+    if(target){ navigate(hash,{fromHistory:true,replaceHistory:true}); }
+    else navigateBack(null,true);
+  });
+}
+
+// Ferramentas de QA expostas somente para testes locais/automatizados.
+window.__UV_QA__={
+  navStack:()=>({current:state.currentView,previous:state.previousView,hash:location.hash}),
+  go:(v)=>navigate(v),
+  back:()=>navigateBack(),
+  assertBack:(expected)=>{const before=state.currentView;navigateBack();return {before,after:state.currentView,expected,ok:state.currentView===expected};},
+  assets:()=>[...document.querySelectorAll('.item-asset-img')].map(i=>({src:i.getAttribute('src'),loaded:i.complete&&i.naturalWidth>0})),
+  character:()=>({body:document.querySelector('.chibi-body')?.getAttribute('d')||'',head:!!document.querySelector('.chibi-head')})
+};
 
 let socketLoaderPromise=null;
 function loadSocketIO(){
@@ -842,7 +874,7 @@ function characterOwned(id){
 function openCharacters(){if(!state.profile)return toast('Perfil ainda não carregado.','error');navigate('characters');renderCharactersPage();}
 function renderCharactersPage(){
   if(!state.profile)return;renderCharacter('#charactersPreview',state.profile.avatar);if($('#charactersPreviewName'))$('#charactersPreviewName').textContent=ORIGINAL_CHARACTERS[state.profile.avatar.character]?.name||'Velhinho';if($('#charactersPreviewPower'))$('#charactersPreviewPower').textContent=`Poder: ${ORIGINAL_CHARACTERS[state.profile.avatar.character]?.power||'Nenhum'}`;
-  const el=$('#charactersCatalog');if(!el)return;el.innerHTML=Object.entries(ORIGINAL_CHARACTERS).map(([id,c])=>{const own=characterOwned(id),sel=(state.profile.avatar.character||'velhinho')===id;return `<button type="button" class="character-card-3d ${own?'unlocked':'locked'} ${sel?'selected':''}" data-character-id="${id}"><div class="character-card-visual">${characterMarkup({...state.profile.avatar,character:id},c.name)}</div><div class="character-card-info"><div><b>${c.icon} ${c.name}</b><span>${own?'DESBLOQUEADO':' BLOQUEADO'}</span></div><small> ${c.power}</small><em>${own?'Toque para usar':c.req}</em></div></button>`;}).join('');
+  const el=$('#charactersCatalog');if(!el)return;el.innerHTML=Object.entries(ORIGINAL_CHARACTERS).map(([id,c])=>{const own=characterOwned(id),sel=(state.profile.avatar.character||'velhinho')===id;const art=`/assets/characters/${encodeURIComponent(id)}.svg`;return `<button type="button" class="character-card-3d ${own?'unlocked':'locked'} ${sel?'selected':''}" data-character-id="${id}"><div class="character-card-visual" style="--character-art:url('${art}')"><img class="character-art-backdrop" src="${art}" alt="" loading="lazy" decoding="async" onerror="this.remove()"><div class="character-art-live">${characterMarkup({...state.profile.avatar,character:id},c.name)}</div></div><div class="character-card-info"><div><b>${c.icon} ${c.name}</b><span>${own?'DESBLOQUEADO':' BLOQUEADO'}</span></div><small> ${c.power}</small><em>${own?'Toque para usar':c.req}</em></div></button>`;}).join('');
   el.querySelectorAll('[data-character-id]').forEach(b=>b.onclick=()=>selectCharacter(b.dataset.characterId));
 }
 async function selectCharacter(id){const c=ORIGINAL_CHARACTERS[id];if(!c)return;if(!characterOwned(id)){toast(` ${c.name}: ${c.req}`,'info');return;}state.profile.avatar.character=id;renderCharactersPage();renderCharacter('#heroCharacter',state.profile.avatar);await persistCharacterSilently();Sound.ok();toast(`${c.name} equipado!`,'success');}
@@ -922,21 +954,16 @@ async function openCEOPanel(){
 async function ceoAction(path,body){try{const d=await post(path,body||{});toast(d.message||'Comando executado.','success');loadCEOUsers()}catch(e){toast(e.message,'error')}}
 async function loadCEOUsers(){const box=document.querySelector('#ceoUsers');if(!box)return;box.innerHTML='<div class="loading">Carregando...</div>';try{const d=await get('/ceo/users');box.innerHTML=(d.users||[]).map(u=>`<div class="ceo-user-row"><div><b>${escapeHtml(u.username)}</b><small>ID ${u.id} • Nível ${u.level} • ${u.xp} XP •  ${u.coins}</small></div><div class="ceo-user-actions"><button data-xp="${u.id}" type="button">ZERAR XP</button><button data-coins="${u.id}" type="button">ZERAR MOEDAS</button><button data-inventory="${u.id}" type="button">LIMPAR INVENTÁRIO</button></div></div>`).join('')||'<div>Nenhum jogador.</div>';box.querySelectorAll('[data-xp]').forEach(b=>b.onclick=()=>ceoAction('/ceo/reset-xp',{userId:Number(b.dataset.xp)}));box.querySelectorAll('[data-coins]').forEach(b=>b.onclick=()=>ceoAction('/ceo/reset-coins',{userId:Number(b.dataset.coins)}));box.querySelectorAll('[data-inventory]').forEach(b=>b.onclick=()=>ceoAction('/ceo/clear-inventory',{userId:Number(b.dataset.inventory)}));}catch(e){box.innerHTML='<div class="error">'+escapeHtml(e.message)+'</div>'}}
 
-function itemVisualIcon(item){
-  const cat=String(item?.category||'').toLowerCase();
-  const id=String(item?.id||'').toLowerCase();
-  if(cat==='hair') return '';
-  if(cat==='clothing'||cat==='top') return '';
-  if(cat==='shoes') return '';
-  if(cat==='accessory') return id.includes('glasses')?'':id.includes('hat')?'':id.includes('backpack')?'':'';
-  if(cat==='effect') return '';
-  if(cat==='emote') return '';
-  if(cat==='title') return '';
-  if(cat==='map') return '';
-  if(cat==='deck') return '';
-  if(cat==='table') return '';
-  return '';
+function assetPathForItem(item){
+  const id=String(item?.id||'').trim();
+  return id && /^[A-Za-z0-9_-]+$/.test(id) ? `/assets/cosmetics/${encodeURIComponent(id)}.svg` : '';
 }
+function itemVisualIcon(item){
+  const src=assetPathForItem(item);
+  if(src) return `<img class="item-asset-img" src="${src}" alt="" loading="lazy" decoding="async" onerror="this.closest('.item-generated-icon')?.classList.add('asset-missing')">`;
+  return '<span class="asset-fallback">✦</span>';
+}
+
 
 async function openShop(mode='official'){
   state.shopMode=mode;
@@ -1084,7 +1111,7 @@ function renderCustomCatalog(category){
     const item=state.items.find(x=>x.id===id); const canUse=owned.has(id)||state.user?.role==='CEO';
     const price=Number(item?.price||0); const name=item?.name||itemName(id); const desc=item?.description||'Item cosmético';
     return `<button class="custom-item-card ${state.profile.avatar[category]===id?'selected':''} ${canUse?'owned':'locked'}" data-custom-item="${escapeHtml(id)}" data-custom-slot="${escapeHtml(category)}" type="button">
-      <div class="custom-photo item-only-photo generated-item-visual"><span>${itemVisualIcon(item||{category:category})}</span><span class="photo-badge">${canUse?' USAR':` ${fmt(price)}`}</span></div>
+      <div class="custom-photo item-only-photo generated-item-visual"><span class="item-generated-icon">${itemVisualIcon(item||{id,category})}</span><span class="photo-badge">${canUse?' USAR':` ${fmt(price)}`}</span></div>
       <div class="custom-item-info"><b>${escapeHtml(name)}</b><small>${escapeHtml(desc)}</small>${canUse?'<em>Toque para equipar</em>':`<em> Compre na loja</em>`}</div>
     </button>`;
   }).join('')||'<div class="empty-state">Nenhuma opção nesta categoria.</div>';
